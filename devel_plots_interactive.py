@@ -226,13 +226,10 @@ def pick_clip_interactively(specs, bird_id, actual_dph, target_dph):
                       interpolation="none", cmap="viridis",
                       vmin=vmin_all, vmax=vmax_all)
             ax.set_xlim(0, max_dur)
-            ax.set_ylabel("kHz", fontsize=8)
-            ax.set_title(f"[{batch_start + i}]  {clip_name}  ({t[-1]:.2f} s)",
-                         fontsize=9, loc="left", pad=3)
-            ax.tick_params(left=True, bottom=False, labelbottom=False, labelsize=7)
+            ax.set_ylabel(f"[{batch_start + i}]\n{clip_name}\nkHz", fontsize=7)
+            ax.tick_params(left=True, bottom=True, labelbottom=False, labelsize=7)
 
         axes[-1][0].tick_params(bottom=True, labelbottom=True)
-        axes[-1][0].set_xlabel("Time (s)", fontsize=8)
 
         n_batches = int(np.ceil(n_total / DISPLAY_BATCH_SIZE))
         cur_batch = batch_start // DISPLAY_BATCH_SIZE + 1
@@ -582,58 +579,73 @@ for bird_id in birds_to_process:
             vmin_set = min(Sxx_log.min() for _, _, _, Sxx_log in specs)
             vmax_set = max(np.percentile(Sxx_log, 99) for _, _, _, Sxx_log in specs)
 
-            result = pick_clip_interactively(specs, bird_id, actual_dph, target_dph)
+            # ---- Browse / select / segment loop ----
+            # Discarding segments (Escape) returns to the clip browser
+            # for the same DPH so you can pick a different clip.
+            dph_done = False
+            while not dph_done:
+                result = pick_clip_interactively(specs, bird_id, actual_dph, target_dph)
 
-            if result["action"] == "quit":
-                print("Quitting.")
-                quit_all = True
-                break
+                if result["action"] == "quit":
+                    print("Quitting.")
+                    quit_all = True
+                    dph_done = True
+                    break
 
-            elif result["action"] == "skip":
-                print(f"Skipped DPH {target_dph}.")
-                continue
+                elif result["action"] == "skip":
+                    print(f"Skipped DPH {target_dph}.")
+                    dph_done = True
+                    break
 
-            elif result["action"] == "selected":
-                idx = result["choice"]
-                clip_name, f, t, Sxx_log = specs[idx]
+                elif result["action"] == "selected":
+                    idx = result["choice"]
+                    clip_name, f, t, Sxx_log = specs[idx]
 
-                # ---- Segmentation (with audio playback) ----
-                segments = segment_clip(clip_name, f, t, Sxx_log,
-                                        vmin_set, vmax_set,
-                                        audios[idx], srs[idx])
+                    # ---- Segmentation (with audio playback) ----
+                    segments = segment_clip(clip_name, f, t, Sxx_log,
+                                            vmin_set, vmax_set,
+                                            audios[idx], srs[idx])
 
-                # ---- Save full WAV (for reference) ----
-                base_path = os.path.join(bird_output, f"DPH_{target_dph}")
-                save_wav(f"{base_path}.wav", audios[idx], srs[idx])
-                print(f"Saved DPH_{target_dph}.wav  (clip: {clip_name}, dur: {t[-1]:.2f}s)")
+                    if not segments:
+                        # User pressed Escape or confirmed with 0 segments
+                        # → go back to clip browser for this DPH
+                        print(f"  No segments confirmed — returning to clip browser.")
+                        continue
 
-                # ---- Save individual segment WAVs ----
-                for si, seg in enumerate(segments):
-                    start = int(seg["onset"] * srs[idx])
-                    end   = int(seg["offset"] * srs[idx])
-                    seg_audio = audios[idx][start:end]
-                    seg_path = f"{base_path}_seg{si}.wav"
-                    save_wav(seg_path, seg_audio, srs[idx])
-                    print(f"  Saved segment {si}: {seg['onset']:.3f}–{seg['offset']:.3f}s → {seg_path}")
+                    # ---- Save full WAV (for reference) ----
+                    base_path = os.path.join(bird_output, f"DPH_{target_dph}")
+                    save_wav(f"{base_path}.wav", audios[idx], srs[idx])
+                    print(f"Saved DPH_{target_dph}.wav  (clip: {clip_name}, dur: {t[-1]:.2f}s)")
 
-                # ---- Save segment metadata ----
-                seg_data = {
-                    "clip_name":   clip_name,
-                    "dph":         int(actual_dph),
-                    "target_dph":  int(target_dph),
-                    "duration_s":  float(t[-1]),
-                    "segments":    segments,
-                }
-                with open(f"{base_path}_segments.json", "w") as fh:
-                    json.dump(seg_data, fh, indent=2)
-                print(f"Saved DPH_{target_dph}_segments.json  ({len(segments)} segment(s))")
+                    # ---- Save individual segment WAVs ----
+                    for si, seg in enumerate(segments):
+                        start = int(seg["onset"] * srs[idx])
+                        end   = int(seg["offset"] * srs[idx])
+                        seg_audio = audios[idx][start:end]
+                        seg_path = f"{base_path}_seg{si}.wav"
+                        save_wav(seg_path, seg_audio, srs[idx])
+                        print(f"  Saved segment {si}: {seg['onset']:.3f}–{seg['offset']:.3f}s → {seg_path}")
 
-                # ---- Build concatenated segment spectrogram for final figure ----
-                seg_spec = build_segment_spec(audios[idx], srs[idx], segments)
-                if seg_spec is not None:
-                    selected_specs.append(seg_spec)
-                    selected_dph.append(target_dph)
-                    selected_segs.append(segments)
+                    # ---- Save segment metadata ----
+                    seg_data = {
+                        "clip_name":   clip_name,
+                        "dph":         int(actual_dph),
+                        "target_dph":  int(target_dph),
+                        "duration_s":  float(t[-1]),
+                        "segments":    segments,
+                    }
+                    with open(f"{base_path}_segments.json", "w") as fh:
+                        json.dump(seg_data, fh, indent=2)
+                    print(f"Saved DPH_{target_dph}_segments.json  ({len(segments)} segment(s))")
+
+                    # ---- Build concatenated segment spectrogram for final figure ----
+                    seg_spec = build_segment_spec(audios[idx], srs[idx], segments)
+                    if seg_spec is not None:
+                        selected_specs.append(seg_spec)
+                        selected_dph.append(target_dph)
+                        selected_segs.append(segments)
+
+                    dph_done = True
 
     # ---- Final development figure (segmented portions only) ----
     save_final_figure(bird_id, selected_specs, selected_dph, selected_segs, OUTPUT_DIR)
